@@ -652,6 +652,46 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
   width: 100%;
   outline: none;
 }
+
+/* ── 新規・複製・ファイル・評価の記録 ── */
+.lib-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.lib-act { border: 1px solid var(--border-2); background: var(--surface); color: var(--text); border-radius: 10px; padding: 11px 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.lib-act:first-child { background: var(--blue); border-color: var(--blue); color: #fff; }
+.lib-act:active { transform: scale(.97); }
+.lib-note { font-size: 12px; color: var(--muted); margin: 0 2px 12px; line-height: 1.6; }
+.lib-note b { color: var(--text); }
+.lib-dirty { display: inline-block; margin-left: 8px; color: #b45309; background: #fef3c7; border-radius: 6px; padding: 1px 8px; font-weight: 700; }
+.s-item-cur { border-color: var(--blue); }
+.io-file-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.rec-btn { border: none; background: var(--blue); color: #fff; font-size: 12px; font-weight: 700; border-radius: 8px; padding: 7px 11px; margin-right: 6px; cursor: pointer; white-space: nowrap; }
+.rec-btn-sub { background: var(--dark-3, #334155); }
+.rec-summary { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 14px; line-height: 1.7; margin-bottom: 14px; color: var(--text); }
+.rec-count { display: flex; gap: 8px; font-weight: 700; font-size: 14px; flex-shrink: 0; }
+.rc-ok { color: #16a34a; } .rc-ng { color: var(--red); }
+.rec-btns { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.rec-del { color: var(--red); }
+.rec-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; color: var(--text); }
+.rec-head { display: grid; gap: 4px; font-size: 14px; margin-bottom: 12px; }
+.rec-k { display: inline-block; min-width: 4.5em; font-size: 11px; font-weight: 700; color: var(--muted); }
+.rec-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rec-table th, .rec-table td { border: 1px solid var(--border); padding: 6px 8px; vertical-align: top; text-align: left; }
+.rec-table th { background: var(--surface-2); font-size: 11px; }
+.rec-res { text-align: center !important; font-weight: 700; font-size: 15px; }
+.rec-ng .rec-res { color: var(--red); }
+.rec-exp { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; }
+.rec-memo { margin-top: 12px; font-size: 13px; white-space: pre-wrap; }
+#print-area { display: none; }
+@media print {
+  #app { display: none !important; }
+  body { background: #fff !important; }
+  #print-area { display: block; color: #000; font-size: 12pt; padding: 0; }
+  #print-area h1 { font-size: 18pt; margin: 0 0 12px; }
+  #print-area .rec-k, #print-area .rec-exp { color: #333; }
+  #print-area .rec-table th, #print-area .rec-table td { border-color: #888; }
+  #print-area .rec-table th { background: #eee; }
+  #print-area .rec-table tr { break-inside: avoid; }
+  #print-area .print-foot { margin-top: 16px; font-size: 9pt; color: #666; text-align: right; }
+}
 </style>
 </head>
 <body>
@@ -675,7 +715,7 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
         <button class="hbtn-io" id="btn-io" title="データ入出力">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
         </button>
-        <button class="hbtn-save" id="btn-save" title="クラウドに保存">
+        <button class="hbtn-save" id="btn-save" title="保存（ライブラリへ）">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
         </button>
       </span>
@@ -687,9 +727,9 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
   </header>
 
   <!-- Sync status -->
-  <div class="sync-bar">
-    <div class="sync-dot" id="sync-dot"></div>
-    <span id="sync-label">ローカル保存</span>
+  <div class="sync-bar" id="sync-bar">
+    <div class="sync-dot ok" id="sync-dot"></div>
+    <span id="sync-label">この端末に保存</span>
   </div>
 
   <!-- Phase nav -->
@@ -706,6 +746,9 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
           活動評価表
         </h2>
+        <span style="flex:1"></span>
+        <button class="rec-btn" id="btn-rec" title="評価を記録する">記録する</button>
+        <button class="rec-btn rec-btn-sub" id="btn-rec-list" title="評価の記録一覧">記録一覧</button>
         <button class="reset-btn" id="btn-reset" title="評価リセット">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 .49-3.5"></path></svg>
         </button>
@@ -757,9 +800,13 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
       </div>
       <div class="modal-body">
         <p style="font-size:12px;font-weight:700;color:var(--text-3);margin-bottom:14px;line-height:1.7">
-          【エクスポート】コピーボタンでテキストをコピーし、メモ帳などに保存してください。<br>
-          【インポート】保存したテキストを貼り付けて「読み込む」を押すと復元できます。
+          【ファイル】今の想定を1つのファイルに書き出したり、書き出したファイルを読み込んだりできます。ほかの端末や仲間に渡すときに使います。<br>
+          【テキスト】コピーボタンでテキストをコピーし、メモ帳などに保存できます。貼り付けて「読み込む」を押すと戻せます。
         </p>
+        <div class="io-file-btns">
+          <button class="btn-ghost" id="btn-io-export">この想定をファイルに書き出す</button>
+          <button class="btn-ghost" id="btn-io-file">ファイルから読み込む</button>
+        </div>
         <div style="position:relative">
           <textarea class="io-textarea" id="io-text" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
           <button class="io-copy-btn" id="btn-copy">
@@ -778,12 +825,49 @@ textarea.abcde-edit:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96
     </div>
   </div>
 
+  <!-- Record Save Modal -->
+  <div class="overlay hidden" id="modal-rec-save">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>評価を記録する</h3>
+        <button class="modal-close" onclick="closeModal('modal-rec-save')">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="rec-summary" id="rec-summary"></div>
+        <div class="card-label">受講者（隊名・名前など）</div>
+        <input class="edit-input" id="rec-trainee" maxlength="60" placeholder="例：東署 救急1 ／ 山田">
+        <div class="card-label" style="margin-top:14px">メモ（任意）</div>
+        <textarea class="edit-input" id="rec-memo" style="min-height:90px" maxlength="2000" placeholder="振り返りで話したことなど"></textarea>
+        <p style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.7">記録はこの端末の中に残ります。ほかの端末へは、症例ライブラリの「全部を書き出す」で渡せます。</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" onclick="closeModal('modal-rec-save')">キャンセル</button>
+        <button class="btn-primary" id="btn-rec-save">記録する</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Records Modal -->
+  <div class="overlay hidden" id="modal-records">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="records-title">評価の記録</h3>
+        <button class="modal-close" onclick="closeModal('modal-records')">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+      <div class="modal-body" id="records-body"></div>
+      <div style="height:env(safe-area-inset-bottom)"></div>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept=".json,application/json,text/plain" style="display:none">
   <div class="toast" id="toast"></div>
 </div>
+<div id="print-area"></div>
 
-<!-- Supabase SDK（複数端末同期に使用。不要な場合も読み込みは無害） -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<script src="config.js"></script>
 <script src="app.js"></script>
 <script>
 /* ── Service Worker 登録 ── */

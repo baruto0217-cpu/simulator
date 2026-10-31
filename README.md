@@ -8,84 +8,24 @@ GitHub Pages で静的ホスティングでき、外部サービスなしでも�
 ## ファイル構成
 
 ```
-ems-simulator/
+simulator/
 ├── index.html      # メインページ（UI全体）
 ├── app.js          # アプリロジック
-├── config.js       # 接続設定（Supabase キーをここに記入）
+├── sw.js           # オフライン対応（自分のキャッシュ ems-sim- だけを扱う）
 ├── manifest.json   # PWA設定
-├── icons/          # アプリアイコン（任意）
-│   ├── icon-192.png
-│   └── icon-512.png
 └── README.md
 ```
 
 ---
 
-## GitHub Pages への公開手順
-
-1. GitHubで新しいリポジトリを作成する
-2. このフォルダのファイルをすべてアップロード（またはgit push）
-3. リポジトリの **Settings → Pages → Source** で `main` ブランチを選択
-4. 数分後に `https://ユーザー名.github.io/リポジトリ名/` で公開される
-
----
-
 ## データ保存の仕組み
 
-| 機能 | 説明 |
-|------|------|
-| **localStorage** | ブラウザにデータを保存。オフラインでも動作。端末をまたいでの共有は不可。 |
-| **Supabase（任意）** | クラウドに保存し、複数端末でリアルタイム同期。無料枠で十分に使用可能。 |
-
-Supabaseを設定しない場合でも、ローカル保存のみで全機能が使えます。
-
----
-
-## Supabase のセットアップ（複数端末で同期したい場合）
-
-### 1. Supabase プロジェクトを作成
-
-1. [https://supabase.com](https://supabase.com) でアカウント作成・ログイン
-2. **New project** をクリックしてプロジェクトを作成（無料）
-3. **Project Settings → API** を開く
-4. `Project URL` と `anon public` キーをコピーしておく
-
-### 2. テーブルを作成
-
-Supabase のダッシュボードで **SQL Editor** を開き、以下を実行：
-
-```sql
--- シナリオ保存テーブル
-create table scenarios (
-  id          uuid primary key default gen_random_uuid(),
-  data        jsonb not null,
-  updated_at  timestamptz default now()
-);
-
--- リアルタイム同期を有効化
-alter table scenarios replica identity full;
-
--- RLS（行レベルセキュリティ）の設定（研修内利用想定）
-create policy "allow all" on scenarios for all using (true) with check (true);
-alter table scenarios enable row level security;
-```
-
-### 3. config.js を書き換える
-
-```js
-window.SUPABASE_URL      = 'https://xxxxxxxxxxxx.supabase.co';
-window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIs...（長いキー）';
-```
-
-### 4. index.html に Supabase SDK を追加
-
-`index.html` の `<script src="config.js">` の前に以下を追記：
-
-```html
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-```
-
-これで複数のiPad・PC間でリアルタイムにデータが同期されます。
+- 想定（症例ライブラリ）と評価の記録は、この端末の中（localStorage）に保存します。
+- ほかの端末や仲間へは、ファイルで渡します。
+  - 1件：想定編集 → データ入出力 →「この想定をファイルに書き出す」
+  - 全部：症例ライブラリ →「全部を書き出す」（想定と評価の記録をまとめて1ファイル）
+  - 受け取った側：「ファイルから読み込む」。今あるものは消さずに足します。
+- ブラウザのデータを消すと、保存したものも消えます。ときどき「全部を書き出す」で控えを取ってください。
 
 ---
 
@@ -97,7 +37,9 @@ window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIs...（長いキー）';
 - **バイタルサイン**：JCS・脈拍・血圧・呼吸数・体温・SpO2・心電図
 - **活動評価表**：OK/NG判定・NGのみフィードバック表示
 - **Take-home Message**：実習まとめ
-- **データ入出力**：JSONテキストでのエクスポート/インポート
+- **新規作成・複製**：症例ライブラリから
+- **評価の記録**：受講者名・日時・○×・メモを残し、一覧・印刷できる
+- **データ入出力**：ファイルまたはJSONテキストで書き出し・読み込み
 - **PWA対応**：ホーム画面追加でアプリとして起動可能（iOS/Android）
 - **iOS最適化**：Safe Area・フォームズーム防止・タッチ操作改善
 
@@ -113,7 +55,6 @@ window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIs...（長いキー）';
 |------|------------------|
 | シナリオ表示・編集 | ✅ 動作する |
 | localStorage 保存 | ✅ 動作する |
-| Supabase 同期 | ❌ 同期されない（再接続時に手動保存） |
 
 ### ホーム画面に追加（アプリとして使う）
 
@@ -130,7 +71,7 @@ window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIs...（長いキー）';
 
 ### キャッシュの更新
 
-アプリを更新した場合、`sw.js` の `CACHE_NAME` を `'ems-sim-v2'` のようにバージョンアップしてください。次回アクセス時に自動で新しいキャッシュに切り替わります。
+アプリを更新した場合、`sw.js` の `CACHE_NAME` の番号（`v3` など）を上げてください。次回アクセス時に自動で新しいキャッシュに切り替わります。
 
 ---
 

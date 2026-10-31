@@ -1,7 +1,6 @@
 /* =============================================================
    救急シミュレーション管理システム  –  app.js
-   依存: config.js (SUPABASE_URL, SUPABASE_ANON_KEY)
-   保存: localStorage (オフライン) + Supabase (クラウド同期)
+   保存: localStorage（この端末の中だけ）。ほかの端末へはファイルで書き出して渡す
    ============================================================= */
 
 'use strict';
@@ -53,107 +52,24 @@ let phaseIdx     = -1;        // -1 = 事前情報
 let evalResults  = {};
 let editMode     = false;
 let activeTab    = 'monitor';
-let supaClient   = null;      // Supabase client (設定済みなら非null)
-let syncChannel  = null;      // Supabase Realtime channel
-
-/* ── Supabase 初期化 ───────────────────────────────── */
-function initSupabase() {
-  if (!window.SUPABASE_URL || window.SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
-  try {
-    // Supabase SDK v2 UMD のグローバル: window.supabase.createClient
-    const createClient = window.supabase?.createClient;
-    if (typeof createClient !== 'function') {
-      console.warn('Supabase SDK が読み込まれていません。');
-      setSyncStatus('err', 'Supabase SDK 読み込みエラー');
-      return;
-    }
-    supaClient = createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
-    setSyncStatus('ok', 'Supabase 接続済み');
-    subscribeRealtime();
-    loadFromSupabase();
-  } catch (e) {
-    console.warn('Supabase 初期化失敗:', e);
-    setSyncStatus('err', 'Supabase 接続エラー');
-  }
-}
-
-function setSyncStatus(state, label) {
-  const dot = document.getElementById('sync-dot');
-  const lbl = document.getElementById('sync-label');
-  dot.className = 'sync-dot' + (state === 'ok' ? ' ok' : state === 'err' ? ' err' : state === 'pulse' ? ' pulse' : '');
-  lbl.textContent = label;
-}
-
-/* ── Supabase CRUD ─────────────────────────────────── */
-async function loadFromSupabase() {
-  if (!supaClient) return;
-  try {
-    const { data, error } = await supaClient
-      .from('scenarios')
-      .select('*')
-      .order('updated_at', { ascending: false });
-    if (error) throw error;
-    if (data && data.length > 0) {
-      savedList = data.map(r => ({ ...r.data, _supaId: r.id }));
-      saveDraftLocal();
-      renderLibraryList();
-    }
-  } catch (e) {
-    console.warn('Supabase 読み込みエラー:', e);
-  }
-}
-
-async function saveToSupabase(s) {
-  if (!supaClient) return false;
-  setSyncStatus('pulse', '保存中...');
-  try {
-    const payload = { data: s, updated_at: new Date().toISOString() };
-    if (s._supaId) {
-      const { error } = await supaClient.from('scenarios').update(payload).eq('id', s._supaId);
-      if (error) throw error;
-    } else {
-      const { data, error } = await supaClient.from('scenarios').insert(payload).select().single();
-      if (error) throw error;
-      s._supaId = data.id;
-    }
-    setSyncStatus('ok', '同期済み');
-    return true;
-  } catch (e) {
-    console.warn('Supabase 保存エラー:', e);
-    setSyncStatus('err', '保存失敗 (ローカルに保存済み)');
-    return false;
-  }
-}
-
-async function deleteFromSupabase(supaId) {
-  if (!supaClient || !supaId) return;
-  try {
-    await supaClient.from('scenarios').delete().eq('id', supaId);
-  } catch (e) {
-    console.warn('Supabase 削除エラー:', e);
-  }
-}
-
-function subscribeRealtime() {
-  if (!supaClient) return;
-  syncChannel = supaClient
-    .channel('scenarios-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'scenarios' }, () => {
-      loadFromSupabase();
-      showToast('他の端末からデータが更新されました');
-    })
-    .subscribe();
-}
+let records      = [];        // 評価の記録 (localStorageから)
 
 /* ── localStorage ──────────────────────────────────── */
 const LS_DRAFT   = 'ems_draft';
 const LS_LIBRARY = 'ems_library';
+const LS_RECORDS = 'ems_records';
+
+const clone = (o) => JSON.parse(JSON.stringify(o));
 
 function saveDraftLocal() {
   try {
     localStorage.setItem(LS_DRAFT, JSON.stringify({ scenario, phaseIdx, evalResults }));
     localStorage.setItem(LS_LIBRARY, JSON.stringify(savedList));
-  } catch (e) { console.warn('localStorage 書き込みエラー:', e); }
+    localStorage.setItem(LS_RECORDS, JSON.stringify(records));
+  } catch (e) {
+    console.warn('localStorage 書き込みエラー:', e);
+    showToast('保存できませんでした（端末の空きが足りない可能性があります）');
+  }
 }
 
 function loadDraftLocal() {
@@ -167,7 +83,10 @@ function loadDraftLocal() {
     }
     const lib = localStorage.getItem(LS_LIBRARY);
     if (lib) savedList = JSON.parse(lib);
+    const rec = localStorage.getItem(LS_RECORDS);
+    if (rec) records = JSON.parse(rec);
   } catch (e) { console.warn('localStorage 読み込みエラー:', e); }
+  if (phaseIdx >= scenario.phases.length) phaseIdx = -1;
 }
 
 /* ── 自動保存 (debounce 1.2s) ──────────────────────── */
@@ -178,43 +97,85 @@ function scheduleSave() {
 }
 
 /* ── シナリオ保存（ライブラリへ）──────────────────── */
-async function saveScenario() {
-  // 既存エントリの更新 or 新規追加
+// ライブラリには写しを入れる。保存ボタンを押すまで、ライブラリの中身は変わらない
+function saveScenario() {
   const idx = savedList.findIndex(s => s.id === scenario.id);
   if (idx >= 0) {
-    savedList[idx] = { ...scenario };
+    savedList[idx] = clone(scenario);
   } else {
-    savedList.unshift({ ...scenario });
+    savedList.unshift(clone(scenario));
   }
   saveDraftLocal();
   renderLibraryList();
-
-  // Supabase 同期
-  if (supaClient) {
-    await saveToSupabase(scenario);
-  }
   showToast('保存しました');
   setEditMode(false);
 }
 
+// 今の想定に、ライブラリへ保存していない変更があるか
+function isDirty() {
+  const s = savedList.find(x => x.id === scenario.id);
+  if (!s) return JSON.stringify(scenario) !== JSON.stringify(_blankOf(scenario));
+  return JSON.stringify(s) !== JSON.stringify(scenario);
+}
+// 新規作成のまま何も書いていない想定は、捨てても確認しない
+function _blankOf(s) {
+  const b = DEFAULT_SCENARIO();
+  b.id = s.id;
+  b.phases.forEach((p, i) => { if (s.phases[i]) p.id = s.phases[i].id; });
+  b.evaluations.forEach((v, i) => { if (s.evaluations[i]) v.id = s.evaluations[i].id; });
+  return b;
+}
+function confirmDiscard() {
+  return !isDirty() || confirm('今の想定に、保存していない変更があります。\n保存せずに切り替えますか？');
+}
+
+/* ── 新規作成・複製 ────────────────────────────────── */
+function newScenario() {
+  if (!confirmDiscard()) return;
+  scenario    = DEFAULT_SCENARIO();
+  phaseIdx    = -1;
+  evalResults = {};
+  closeModal('modal-lib');
+  saveDraftLocal();
+  setEditMode(true);
+  showToast('新しい想定を作りました。書き終えたら保存を押してください');
+}
+
+function duplicateScenario() {
+  const c = clone(scenario);
+  c.id    = uid();
+  c.title = (scenario.title || '想定') + '（コピー）';
+  c.phases.forEach(p => { p.id = uid(); });
+  scenario    = c;
+  phaseIdx    = -1;
+  evalResults = {};
+  closeModal('modal-lib');
+  saveDraftLocal();
+  setEditMode(true);
+  showToast('複製しました。保存すると別の想定として残ります');
+}
+
 /* ── シナリオ削除 ──────────────────────────────────── */
-async function deleteScenario(id, e) {
-  e.stopPropagation();
+function deleteScenario(id) {
   const s = savedList.find(x => x.id === id);
+  if (!s) return;
+  if (!confirm(`「${s.title}」をライブラリから消しますか？\n消した想定は元に戻せません。`)) return;
   savedList = savedList.filter(x => x.id !== id);
   saveDraftLocal();
   renderLibraryList();
-  if (s && s._supaId) await deleteFromSupabase(s._supaId);
+  showToast('消しました');
 }
 
 /* ── シナリオ読込 ──────────────────────────────────── */
 function loadScenario(id) {
   const s = savedList.find(x => x.id === id);
   if (!s) return;
-  scenario    = JSON.parse(JSON.stringify(s));
+  if (s.id !== scenario.id && !confirmDiscard()) return;
+  scenario    = clone(s);
   phaseIdx    = -1;
   evalResults = {};
   closeModal('modal-lib');
+  saveDraftLocal();
   renderAll();
 }
 
@@ -321,22 +282,19 @@ async function copyIO() {
 function importIO() {
   const errEl = document.getElementById('io-error');
   errEl.innerHTML = '';
+  let parsed;
   try {
-    const parsed = JSON.parse(document.getElementById('io-text').value);
-    if (!parsed || !parsed.title || !Array.isArray(parsed.phases)) {
-      errEl.innerHTML = '<div class="error-msg">正しいシナリオデータではありません。</div>';
-      return;
-    }
-    scenario    = parsed;
-    phaseIdx    = -1;
-    evalResults = {};
-    closeModal('modal-io');
-    scheduleSave();
-    renderAll();
-    showToast('読み込みました');
+    parsed = JSON.parse(document.getElementById('io-text').value);
   } catch (e) {
     errEl.innerHTML = '<div class="error-msg">JSONの形式が不正です。文字が欠けていないか確認してください。</div>';
+    return;
   }
+  if (parsed && parsed.app === FILE_APP && Array.isArray(parsed.scenarios)) { closeModal('modal-io'); mergeAll(parsed); return; }
+  if (!isScenario(parsed)) {
+    errEl.innerHTML = '<div class="error-msg">正しいシナリオデータではありません。</div>';
+    return;
+  }
+  loadImported(parsed);
 }
 
 /* ── トースト ──────────────────────────────────────── */
@@ -720,48 +678,288 @@ function initEvalDragSort(container) {
 /* ── ライブラリ一覧 ────────────────────────────────── */
 function renderLibraryList() {
   const body = document.getElementById('lib-body');
+  let html = `<div class="lib-actions">
+    <button class="lib-act" data-act="new">＋ 新規作成</button>
+    <button class="lib-act" data-act="dup">今の想定を複製</button>
+    <button class="lib-act" data-act="export-all">全部を書き出す</button>
+    <button class="lib-act" data-act="import-file">ファイルから読み込む</button>
+  </div>
+  <div class="lib-note">今の想定：<b>${esc(scenario.title)}</b>${isDirty() ? '<span class="lib-dirty">保存していない変更あり</span>' : ''}</div>`;
   if (!savedList.length) {
-    body.innerHTML = `<div style="text-align:center;padding:48px 0;color:var(--muted);font-weight:700">保存されたデータがありません</div>`;
-    return;
-  }
-  body.innerHTML = savedList.map(s => `
-    <div class="s-item" data-sid="${esc(s.id)}">
+    html += `<div style="text-align:center;padding:48px 0;color:var(--muted);font-weight:700">保存されたデータがありません</div>`;
+  } else {
+    html += savedList.map(s => `
+    <div class="s-item${s.id === scenario.id ? ' s-item-cur' : ''}" data-sid="${esc(s.id)}">
       <div style="min-width:0;flex:1">
         <div style="font-weight:700;font-size:14px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.title)}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">
-          ${esc(s.info?.age||'')} ${esc(s.info?.gender||'')} &bull; ${(s.phases||[]).length} フェーズ
+          ${esc(s.info?.age||'')} ${esc(s.info?.gender||'')} &bull; ${(s.phases||[]).length} フェーズ${s.id === scenario.id ? ' &bull; 表示中' : ''}
         </div>
       </div>
-      <button class="s-item-del" data-del="${esc(s.id)}">
+      <button class="s-item-del" data-del="${esc(s.id)}" title="ライブラリから消す">
         <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M9 6V4h6v2"/></svg>
       </button>
     </div>
   `).join('');
+  }
+  body.innerHTML = html;
 
   body.onclick = (e) => {
+    const act = e.target.closest('[data-act]');
+    if (act) {
+      const a = act.getAttribute('data-act');
+      if (a === 'new') newScenario();
+      else if (a === 'dup') duplicateScenario();
+      else if (a === 'export-all') exportAllFile();
+      else if (a === 'import-file') pickFile();
+      return;
+    }
     const delBtn = e.target.closest('[data-del]');
     if (delBtn) {
       e.stopPropagation();
-      const id = delBtn.getAttribute('data-del');
-      const s = savedList.find(x => x.id === id);
-      savedList = savedList.filter(x => x.id !== id);
-      saveDraftLocal();
-      renderLibraryList();
-      if (s && s._supaId) deleteFromSupabase(s._supaId);
+      deleteScenario(delBtn.getAttribute('data-del'));
       return;
     }
     const item = e.target.closest('[data-sid]');
-    if (item) {
-      const id = item.getAttribute('data-sid');
-      const s = savedList.find(x => x.id === id);
-      if (!s) return;
-      scenario    = JSON.parse(JSON.stringify(s));
-      phaseIdx    = -1;
-      evalResults = {};
-      closeModal('modal-lib');
-      renderAll();
+    if (item) loadScenario(item.getAttribute('data-sid'));
+  };
+}
+
+/* ── ファイルの書き出し・読み込み ──────────────────── */
+const FILE_APP = 'ems-simulator';
+
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function downloadJSON(obj, name) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name.replace(/[\\/:*?"<>|\s]+/g, '_');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportCurrentFile() {
+  downloadJSON(scenario, `救急Sim_${scenario.title || '想定'}_${today()}.json`);
+}
+
+function exportAllFile() {
+  if (!savedList.length && !records.length) { showToast('書き出すデータがありません'); return; }
+  downloadJSON({ app: FILE_APP, version: 1, exportedAt: new Date().toISOString(), scenarios: savedList, records },
+    `救急Sim_全部_${today()}.json`);
+  showToast(`想定${savedList.length}件・記録${records.length}件を書き出しました`);
+}
+
+function pickFile() {
+  const inp = document.getElementById('file-input');
+  inp.value = '';
+  inp.click();
+}
+
+function onFilePicked(ev) {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let obj;
+    try { obj = JSON.parse(reader.result); }
+    catch (e) { alert('このファイルは読み込めません（形式が違います）。'); return; }
+    if (obj && obj.app === FILE_APP && Array.isArray(obj.scenarios)) mergeAll(obj);
+    else if (isScenario(obj)) loadImported(obj);
+    else alert('このアプリで書き出したファイルではないようです。');
+  };
+  reader.readAsText(f);
+}
+
+function isScenario(o) {
+  return !!(o && typeof o.title === 'string' && Array.isArray(o.phases) && o.phases.length);
+}
+
+// 足りない項目を補って、画面が崩れないようにする
+function normalizeScenario(o) {
+  o.id = o.id ? String(o.id) : uid();
+  o.info = Object.assign({}, o.info || {});
+  if (!Array.isArray(o.evaluations)) o.evaluations = [];
+  o.evaluations.forEach(v => { if (!v.id) v.id = uid(); });
+  o.phases.forEach(p => {
+    if (!p.id) p.id = uid();
+    p.abcde  = Object.assign({}, p.abcde || {});
+    p.vitals = Object.assign({}, p.vitals || {});
+  });
+  return o;
+}
+
+// 1件の想定を読み込む。ライブラリにある別の中身と同じIDなら、上書きしないよう新しいIDにする
+function loadImported(obj) {
+  if (!confirmDiscard()) return false;
+  const c = normalizeScenario(clone(obj));
+  const same = savedList.find(x => x.id === c.id);
+  if (same && JSON.stringify(same) !== JSON.stringify(c)) c.id = uid();
+  scenario    = c;
+  phaseIdx    = -1;
+  evalResults = {};
+  closeModal('modal-io');
+  closeModal('modal-lib');
+  saveDraftLocal();
+  renderAll();
+  showToast(same && same.id === c.id ? '読み込みました' : '読み込みました。保存するとライブラリに入ります');
+  return true;
+}
+
+// 全部の書き出しファイルを、今のライブラリと記録に足す（今あるものは消さない）
+function mergeAll(obj) {
+  let addS = 0, skipS = 0, addR = 0;
+  obj.scenarios.filter(isScenario).forEach(s0 => {
+    const s = normalizeScenario(clone(s0));
+    const same = savedList.find(x => x.id === s.id);
+    if (same && JSON.stringify(same) === JSON.stringify(s)) { skipS++; return; }
+    if (same) s.id = uid();
+    savedList.push(s);
+    addS++;
+  });
+  (Array.isArray(obj.records) ? obj.records : []).forEach(r => {
+    if (!r || !r.id || !Array.isArray(r.items) || records.some(x => x.id === r.id)) return;
+    records.push(r);
+    addR++;
+  });
+  records.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  saveDraftLocal();
+  renderLibraryList();
+  alert(`読み込みました。\n想定：${addS}件を追加${skipS ? `（同じもの${skipS}件は飛ばしました）` : ''}\n評価の記録：${addR}件を追加`);
+}
+
+/* ── 評価の記録 ────────────────────────────────────── */
+function evalCounts(items) {
+  const c = { ok: 0, ng: 0, none: 0 };
+  items.forEach(i => { if (i.res === 'ok') c.ok++; else if (i.res === 'ng') c.ng++; else c.none++; });
+  return c;
+}
+
+function currentEvalItems() {
+  return scenario.evaluations.map(v => ({ task: v.task, explanation: v.explanation, res: evalResults[v.id] || '' }));
+}
+
+function openRecordSave() {
+  if (!scenario.evaluations.length) { showToast('評価項目がありません'); return; }
+  const c = evalCounts(currentEvalItems());
+  document.getElementById('rec-summary').innerHTML =
+    `<b>${esc(scenario.title)}</b><br>○ ${c.ok}　× ${c.ng}　未評価 ${c.none}`;
+  document.getElementById('rec-trainee').value = '';
+  document.getElementById('rec-memo').value = '';
+  openModal('modal-rec-save');
+  setTimeout(() => document.getElementById('rec-trainee').focus(), 50);
+}
+
+function saveRecord() {
+  const trainee = document.getElementById('rec-trainee').value.trim();
+  if (!trainee) { alert('受講者（隊名・名前など）を入れてください。'); return; }
+  const items = currentEvalItems();
+  const c = evalCounts(items);
+  if (c.none && !confirm(`まだ評価していない項目が${c.none}つあります。このまま記録しますか？`)) return;
+  records.unshift({
+    id: uid(),
+    date: new Date().toISOString(),
+    scenarioId: scenario.id,
+    scenarioTitle: scenario.title,
+    trainee,
+    memo: document.getElementById('rec-memo').value.trim(),
+    items
+  });
+  saveDraftLocal();
+  closeModal('modal-rec-save');
+  showToast('評価を記録しました');
+}
+
+function fmtDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function openRecords() {
+  renderRecordList();
+  openModal('modal-records');
+}
+
+function renderRecordList() {
+  const body = document.getElementById('records-body');
+  document.getElementById('records-title').textContent = '評価の記録';
+  if (!records.length) {
+    body.innerHTML = `<div style="text-align:center;padding:48px 0;color:var(--muted);font-weight:700">記録はまだありません<br><span style="font-size:12px">活動評価表の「記録する」から残せます</span></div>`;
+    body.onclick = null;
+    return;
+  }
+  body.innerHTML = records.map(r => {
+    const c = evalCounts(r.items || []);
+    return `<div class="s-item" data-rid="${esc(r.id)}">
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:700;font-size:14px;color:var(--text)">${esc(r.trainee)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;font-weight:700">${esc(fmtDate(r.date))} &bull; ${esc(r.scenarioTitle)}</div>
+      </div>
+      <div class="rec-count"><span class="rc-ok">○${c.ok}</span><span class="rc-ng">×${c.ng}</span></div>
+    </div>`;
+  }).join('');
+  body.onclick = (e) => {
+    const it = e.target.closest('[data-rid]');
+    if (it) renderRecordDetail(it.getAttribute('data-rid'));
+  };
+}
+
+function recordHTML(r) {
+  const c = evalCounts(r.items || []);
+  return `<div class="rec-head">
+      <div><span class="rec-k">受講者</span>${esc(r.trainee)}</div>
+      <div><span class="rec-k">日時</span>${esc(fmtDate(r.date))}</div>
+      <div><span class="rec-k">想定</span>${esc(r.scenarioTitle)}</div>
+      <div><span class="rec-k">結果</span>○ ${c.ok}　× ${c.ng}　未評価 ${c.none}</div>
+    </div>
+    <table class="rec-table"><thead><tr><th style="width:2.5em">No</th><th>評価項目</th><th style="width:4.2em;white-space:nowrap">結果</th></tr></thead><tbody>
+    ${(r.items || []).map((i, n) => `<tr class="${i.res === 'ng' ? 'rec-ng' : ''}">
+      <td>${n+1}</td>
+      <td><b>${esc(i.task)}</b>${i.res === 'ng' && i.explanation ? `<div class="rec-exp">${esc(i.explanation)}</div>` : ''}</td>
+      <td class="rec-res">${i.res === 'ok' ? '○' : i.res === 'ng' ? '×' : '−'}</td></tr>`).join('')}
+    </tbody></table>
+    ${r.memo ? `<div class="rec-memo"><span class="rec-k">メモ</span><div>${esc(r.memo)}</div></div>` : ''}`;
+}
+
+function renderRecordDetail(id) {
+  const r = records.find(x => x.id === id);
+  if (!r) return;
+  const body = document.getElementById('records-body');
+  document.getElementById('records-title').textContent = '記録の内容';
+  body.innerHTML = `<div class="rec-btns">
+      <button class="btn-ghost" data-rec="back">← 一覧へ</button>
+      <span style="flex:1"></span>
+      <button class="btn-ghost rec-del" data-rec="del">消す</button>
+      <button class="btn-primary" data-rec="print">印刷</button>
+    </div>
+    <div class="rec-card">${recordHTML(r)}</div>`;
+  body.onclick = (e) => {
+    const b = e.target.closest('[data-rec]');
+    if (!b) return;
+    const a = b.getAttribute('data-rec');
+    if (a === 'back') renderRecordList();
+    else if (a === 'print') printRecord(r);
+    else if (a === 'del') {
+      if (!confirm(`${r.trainee}さんの記録（${fmtDate(r.date)}）を消しますか？\n消した記録は元に戻せません。`)) return;
+      records = records.filter(x => x.id !== id);
+      saveDraftLocal();
+      renderRecordList();
+      showToast('記録を消しました');
     }
   };
+}
+
+function printRecord(r) {
+  document.getElementById('print-area').innerHTML =
+    `<h1>活動評価表</h1>${recordHTML(r)}<div class="print-foot">救急シミュレーション管理システム</div>`;
+  window.print();
 }
 
 /* ── レスポンシブ ──────────────────────────────────── */
@@ -791,7 +989,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-io').addEventListener('click', openIO);
   document.getElementById('btn-import').addEventListener('click', importIO);
   document.getElementById('btn-copy').addEventListener('click', copyIO);
+  document.getElementById('btn-io-export').addEventListener('click', exportCurrentFile);
+  document.getElementById('btn-io-file').addEventListener('click', pickFile);
+  document.getElementById('file-input').addEventListener('change', onFilePicked);
   document.getElementById('btn-reset').addEventListener('click', resetEval);
+  document.getElementById('btn-rec').addEventListener('click', openRecordSave);
+  document.getElementById('btn-rec-list').addEventListener('click', openRecords);
+  document.getElementById('btn-rec-save').addEventListener('click', saveRecord);
 
   // モーダルの背景クリックで閉じる
   document.querySelectorAll('.overlay').forEach(el => {
@@ -801,11 +1005,4 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   window.addEventListener('resize', handleResize);
-
-  // Supabase 初期化（config.js にキーが設定されていれば）
-  if (window.SUPABASE_URL && window.SUPABASE_URL !== 'YOUR_SUPABASE_URL') {
-    initSupabase();
-  } else {
-    setSyncStatus('', 'ローカル保存のみ（Supabase未設定）');
-  }
 });
